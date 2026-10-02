@@ -3,16 +3,18 @@ from __future__ import annotations
 import operator
 from typing import TYPE_CHECKING, Any, cast
 
-from duckdb import CoalesceOperator, StarExpression
+from duckdb import BinderException, CoalesceOperator, StarExpression
 
 from narwhals._duckdb.expr_dt import DuckDBExprDateTimeNamespace
 from narwhals._duckdb.expr_list import DuckDBExprListNamespace
 from narwhals._duckdb.expr_str import DuckDBExprStringNamespace
 from narwhals._duckdb.expr_struct import DuckDBExprStructNamespace
 from narwhals._duckdb.utils import (
+    INTEGER_TYPE_IDS,
     DeferredTimeZone,
     F,
     col,
+    duckdb_dtypes,
     generate_order_by_sql,
     lit,
     narwhals_to_native_dtype,
@@ -277,6 +279,53 @@ class DuckDBExpr(SQLExpr["DuckDBLazyFrame", "Expression"]):
 
         assert value is not None  # noqa: S101
         return self._with_elementwise(_fill_constant, expression_args={"value": value})
+
+    def sum(self) -> Self:
+        # DuckDB widens `sum` over any integer width to a 128-bit integer. Arrow has
+        # no 128-bit integer type, so the result surfaces as `Decimal(38, 0)`: it is
+        # then not an integer dtype, and arithmetic on it overflows Arrow's decimal
+        # precision. Narrow back to `BIGINT`, so that summing integers returns an
+        # integer as it does on every other backend.
+        def _total(expr: Expression) -> Expression:
+            return CoalesceOperator(F("sum", expr), lit(0))
+
+        def _narrow(
+            df: DuckDBLazyFrame, exprs: list[Expression], totals: list[Expression]
+        ) -> list[Expression]:
+            try:
+                types = df.native.select(*exprs).types
+            except BinderException:
+                # The expression does not bind (e.g. it names a column which is not
+                # there). Leave the totals alone, so that the frame raises its usual
+                # `ColumnNotFoundError` rather than this one.
+                return totals
+            return [
+                total.cast(duckdb_dtypes.BIGINT) if tp.id in INTEGER_TYPE_IDS else total
+                for tp, total in zip(types, totals, strict=True)
+            ]
+
+        def func(df: DuckDBLazyFrame) -> list[Expression]:
+            exprs = list(self(df))
+            return _narrow(df, exprs, [_total(expr) for expr in exprs])
+
+        def window_f(df: DuckDBLazyFrame, inputs: DuckDBWindowInputs) -> list[Expression]:
+            assert not inputs.order_by  # noqa: S101
+            exprs = list(self(df))
+            totals = [
+                CoalesceOperator(
+                    self._window_expression(F("sum", expr), inputs.partition_by), lit(0)
+                )
+                for expr in exprs
+            ]
+            return _narrow(df, exprs, totals)
+
+        return self.__class__(
+            func,
+            window_f,
+            evaluate_output_names=self._evaluate_output_names,
+            alias_output_names=self._alias_output_names,
+            version=self._version,
+        )
 
     def cast(self, dtype: IntoDType) -> Self:
         def func(df: DuckDBLazyFrame) -> list[Expression]:

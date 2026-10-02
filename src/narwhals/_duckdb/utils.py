@@ -207,6 +207,24 @@ def fetch_rel_time_zone(rel: duckdb.DuckDBPyRelation) -> str:
     return result[0]  # type: ignore[no-any-return]
 
 
+# DuckDB type ids for the fixed-width integer types, excluding the 128-bit ones.
+# Arrow has no 128-bit integer type, so a `HUGEINT` / `UHUGEINT` column can only be
+# represented as `Decimal(38, 0)`; aggregations that widen to 128 bits are narrowed
+# back to `BIGINT` so that they keep an integer dtype.
+INTEGER_TYPE_IDS: frozenset[str] = frozenset(
+    (
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "utinyint",
+        "usmallint",
+        "uinteger",
+        "ubigint",
+    )
+)
+
+
 @lru_cache(maxsize=16)
 def _non_nested_native_to_narwhals_dtype(duckdb_dtype_id: str, version: Version) -> DType:
     dtypes = version.dtypes
@@ -423,6 +441,7 @@ def sql_expression(expr: str) -> Expression:
 
 
 __all__ = [
+    "INTEGER_TYPE_IDS",
     "UNITS_DICT",
     "DeferredTimeZone",
     "F",

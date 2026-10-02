@@ -23,3 +23,17 @@ def test_expr_sum_series(
     series = nw.from_native(constructor_eager(data), eager_only=True)[col]
     result = series.sum()
     assert_equal_data({col: [result]}, {col: [expected]})
+
+
+def test_expr_sum_integer_dtype(constructor: Constructor) -> None:
+    # The sum of an integer column is an integer on every backend. DuckDB widens
+    # `sum` to a 128-bit integer, which Arrow can only represent as a decimal.
+    df = nw.from_native(constructor({"a": [1, 3, 2]}))
+    result = df.select(nw.col("a").sum()).lazy().collect()
+    assert result.collect_schema()["a"].is_integer()
+
+
+def test_expr_sum_integer_dtype_group_by(constructor: Constructor) -> None:
+    df = nw.from_native(constructor({"g": ["x", "x", "y"], "a": [1, 3, 2]}))
+    result = df.group_by("g").agg(nw.col("a").sum()).lazy().collect()
+    assert result.collect_schema()["a"].is_integer()
